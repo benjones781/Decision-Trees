@@ -1,0 +1,225 @@
+---
+title: "SEAHAWKS SHOULD HAVE RAN THE BALL"
+subtitle: "Artificial American Football Coach with Decision Trees"
+author: "Benjamin Jones"
+date: "February 28, 2020"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Introduction
+Have you ever dreamed of being an NFL coach? No? Me neither... 
+Maybe you have a child on a pee wee football team in need of a coach? Also no? Same...
+But perhaps you like data? If *you're* reading this, chances are you answered 'yes' to at least one of those questions.
+
+The following dataset consists of football situations and the correct play to call for each situation. Let's see if it is possible to create a decision tree which, given a situation, can output the correct play to call. We'll try a few different tree models. The dataset is titled _Football Strategy_ and publicly available [\textcolor{blue}{here}](https://www.figure-eight.com/data-for-everyone/).
+
+## Setup
+
+Load the necessary libraries as well as authenticate the [\textcolor{blue}{data.world}](http://data.world) API:
+
+```{r libraries, message=FALSE}
+library(data.world)
+library(jsonlite)
+library(stringr)
+library(rpart)
+library(rpart.plot)
+library(ipred)
+library(randomForest)
+library(rpart)
+library(caret) 
+setwd("~/Desktop")
+dw_auth <- read_json("dw_cred.json")
+saved_cfg <- save_config(dw_auth$token)
+set_config(saved_cfg)
+```
+
+Query the data:
+
+```{r query}
+df <- query(qry_sql(paste0("SELECT football_scenarios_dfe_832307.antecedent as LABEL,
+                            football_scenarios_dfe_832307.orig_antecedent as SITUATION ",
+                            "FROM football_scenarios_dfe_832307")),
+                            dataset="https://data.world/wppdatacatalogue/football-strategy")
+```
+
+\newpage
+Preview the data:
+
+```{r preview}
+head(df, 3)
+```
+
+It's difficult to see, but an example of a full value of an entry in **SITUATION** is "It is first down and 10. The ball is on your opponent's 20 yardline. There is 3 seconds left in the second quarter. You are down by 3 points. Would you: "
+
+## Cleaning
+
+The entries of the football situation is a messy, as it is a long string. Fortunately, the values are consistent and we can do use patterns to pull out useful quantitative and qualitative features. For example:
+
+"It is \textcolor{red}{first down} and \textcolor{cyan}{10}. The ball is on \textcolor{cyan}{your opponent's 20} yardline. There is \textcolor{cyan}{3} seconds left in the \textcolor{red}{second quarter}. You are \textcolor{cyan}{down by 3} points. Would you: "
+
+"It is \textcolor{red}{third down} and \textcolor{cyan}{inches}. The ball is on \textcolor{cyan}{your 15} yardline. There is \textcolor{cyan}{3} seconds left in the \textcolor{red}{fourth quarter}. You are \textcolor{cyan}{up by 7} points. Would you: "
+
+Numerical values used will be: yards to go, yard line, seconds left, and point differential. When distance is 'inches', it will be converted to 0.
+
+Categorical valeus used will be: down and quarter.
+
+```{r}
+### Remove Cases that Don't Follow the Pattern
+df <- df[grep("It is", df$SITUATION),]
+df <- df[grep("The ball is", df$SITUATION),]
+df <- df[grep("There is", df$SITUATION),]
+```
+
+
+### Down and Yards to Go
+```{r down and ytg}
+df$DOWN <- ""
+df$YTG <- ""
+
+for (i in 1:nrow(df)) {
+ss1 <- str_split_fixed(df[i,2], " down ", 2)[1,1]
+df$DOWN[i] <- str_split_fixed(ss1, "It is ", 2)[1,2]
+
+ss2 <- str_split_fixed(df[i,2], " down ", 2)[1,2]
+ss3 <- str_split_fixed(ss2, "and ", 2)
+df$YTG[i] <- str_split_fixed(ss3, "\\.", 2)[2,1]
+}
+
+df$YTG <- str_replace(df$YTG, "inches", "0")
+df$YTG <- as.numeric(df$YTG)
+```
+
+\newpage
+### Yardline
+```{r position}
+df$YL <- 0
+for (i in 1:nrow(df)) {
+ss1 <- str_split_fixed(df[i,2], "The ball is on ", 2)[1,2]
+ss2 <- str_split_fixed(ss1, " yardline.", 2)[1,1]
+df$YL[i] <- as.numeric(gsub("[^0-9.-]", "", ss2))
+  if (grepl("your opponent", ss1)) {
+    df$YL[i] <- 50 + (50-df$YL[i])
+  } else {
+    df$YL[i] <- df$YL[i]
+  }
+}
+```
+
+### Seconds and Quarter
+
+```{r sec and q}
+df$SEC <- 0
+df$Q <- ""
+for (i in 1:nrow(df)) {
+  ss1 <- str_split_fixed(df[i,2], "There is ", 2)[1,2]
+  if (grepl("minute", ss1)) {
+    df$SEC[i] <- as.numeric(str_split_fixed(ss1, " minute", 2)[1,1])*60
+  } else{
+    df$SEC[i] <- as.numeric(str_split_fixed(ss1, " second", 2)[1,1])
+  }
+  ss2 <- str_split_fixed(ss1, " quarter", 2)[1,1]
+  df$Q[i] <- str_split_fixed(ss2, " in the ", 2)[1,2]
+}
+```
+
+### Score
+
+```{r score}
+df$PTS <-0
+for (i in 1:nrow(df)) {
+  ss1 <- str_split_fixed(df[i,2], "You are ", 2)[1,2]
+  ss2 <- str_split_fixed(ss1, "by ", 2)[1,2]
+  df$PTS[i] <- as.numeric(str_split_fixed(ss2, " points", 2)[1,1])
+  if (grepl("down", ss1)) {
+    df$PTS[i] <- df$PTS[i]*-1
+  }
+}
+```
+
+\newpage
+### Final Dataset
+Due to the fact there were only 9 cases of "Don't Know/it depends", and that it's not helpful, remove those cases.
+```{r}
+df$SITUATION <- NULL
+df <- subset(df, df$LABEL != "Don't know / it depends")
+df$LABEL <- as.factor(df$LABEL)
+df$DOWN <- as.factor(df$DOWN)
+df$Q <- as.factor(df$Q)
+head(df, 5)
+```
+
+### Split into Training/Validation
+While not shown here, distribution of labels between training and validation sets was assumed to be similar and was verified.
+
+```{r train and val}
+set.seed(74)
+split_size <- floor(0.75*nrow(df))
+split_index <- sample(seq_len(nrow(df)), size = split_size)
+
+train <- df[split_index, ]
+val <- df[-split_index, ]
+```
+
+\newpage
+## Decision Trees
+
+### Bootstrap Aggregation aka _Belicheck Yourself_
+```{r bagging}
+tree1 <- bagging(LABEL~., data=train)
+results1 <- table(predict(tree1, val[,2:7]), val$LABEL)
+confusionMatrix(results1)
+#varImp(tree1)
+```
+
+\newpage
+### Random Forest aka _Andy Feed_
+```{r random forest}
+tree2 <- randomForest(LABEL~., data=train)
+results2 <- table(predict(tree2, val[,2:7]), val$LABEL)
+confusionMatrix(results2)
+#varImp(tree2)
+```
+
+\newpage
+### Classification and Regression aka _Mike Shanahan-me-down_
+```{r rpart}
+tree3 <- rpart(LABEL~., data=train)
+results3 <- table(predict(tree3, val[,2:7], type="class"), val$LABEL)
+confusionMatrix(results3)
+#varImp(tree3)
+```
+
+\newpage
+## Conclusion
+*Feature Importance* can also be evaluated. Similar to _Guess Who?_, feature importance describes the most efficient path of questioning to get to an answer. In this context, importance reveals which factors of the current play/game will lead to a play calling decision in the least amount of steps. In this experiment, the features ranked in descending order of importance are:
+
+1. What down it is
+2. Yards to Go
+3. Yardline (position on field)
+5. Score differential
+6. Seconds remaining in the quarter
+7. Which quarter it is
+
+
+
+What I'm trying to say is... wait let me verify...
+
+```{r seahawks}
+i <- nrow(val)+1
+val[i, 2] <- as.factor('second') #second down
+val[i, 3] <- as.numeric(1) #1 yard to go
+val[i, 4] <- as.numeric(99) #99 yard line
+val[i, 5] <- as.numeric(26) #26s on the clock
+val[i, 6] <- as.factor('fourth') #fourth quater
+val[i, 7] <- as.numeric(-4) #down by 4
+
+predict(tree1, val[i,2:7])
+predict(tree2,val[i,2:7])
+predict(tree3, val[i,2:7], type="class")
+```
+
+The Seahawks should have _kicked_ the ball? [\textcolor{blue}{Well nobody's perfect...}](https://www.youtube.com/watch?v=U7rPIg7ZNQ8)
